@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -114,6 +115,15 @@ class ContentGenerator:
         3) Long-form post of at least {CONTENT_CONFIG.min_post_words} words.
         4) Short teaser of about {CONTENT_CONFIG.teaser_length} characters for Substack Notes/Instagram.
         5) Three safe image prompts: main cover, background, thumbnail.
+
+        Respond using these labeled sections with blank lines between them so paragraphs inside "Long Post" stay intact:
+        Title:
+        Subtitle:
+        Long Post:
+        Teaser:
+        Main Image:
+        Background Image:
+        Thumbnail Image:
         """
         return self.tone_guard.add_voice_notes(base_prompt)
 
@@ -127,17 +137,42 @@ class ContentGenerator:
         return completion.output[0].content[0].text
 
     def _parse_response(self, response: str) -> ContentBundle:
-        sections = [part.strip(" \n#-") for part in response.split("\n\n") if part.strip()]
-        if len(sections) < 5:
-            raise ValueError("Model response missing sections.")
-        title, subtitle, long_post, teaser, *image_blocks = sections
-        image_prompts: Dict[str, str] = {}
-        labels = ["main", "background", "thumbnail"]
-        for label, block in zip(labels, image_blocks):
-            image_prompts[label] = block
+        marker_pattern = re.compile(
+            r"^(?P<label>(?:Title|Subtitle|Long Post|Long-Form Post|Teaser|Main Image|Background Image|Thumbnail Image)):\\s*(?P<value>.*?)(?=^(?:Title|Subtitle|Long Post|Long-Form Post|Teaser|Main Image|Background Image|Thumbnail Image):|\\Z)",
+            re.IGNORECASE | re.MULTILINE | re.DOTALL,
+        )
+        captured = {match.group("label").lower(): match.group("value").strip() for match in marker_pattern.finditer(response)}
+
+        if captured:
+            title = captured.get("title")
+            subtitle = captured.get("subtitle")
+            long_post = captured.get("long post") or captured.get("long-form post")
+            teaser = captured.get("teaser")
+            image_prompts = {
+                "main": captured.get("main image", ""),
+                "background": captured.get("background image", ""),
+                "thumbnail": captured.get("thumbnail image", ""),
+            }
+            if not all([title, subtitle, long_post, teaser]):
+                raise ValueError("Model response missing required labeled sections.")
+        else:
+            sections = [part.strip(" \n#-") for part in response.split("\n\n") if part.strip()]
+            if len(sections) < 7:
+                raise ValueError("Model response missing sections for fallback parsing.")
+
+            title, subtitle = sections[0], sections[1]
+            teaser = sections[-4]
+            image_blocks = sections[-3:]
+            long_post_blocks = sections[2:-4]
+            if not long_post_blocks:
+                raise ValueError("Model response missing long post content.")
+            long_post = "\n\n".join(long_post_blocks)
+            labels = ["main", "background", "thumbnail"]
+            image_prompts = {label: block for label, block in zip(labels, image_blocks)}
+
         self.tone_guard.validate_all([title, subtitle, long_post, teaser, *image_prompts.values()])
         return ContentBundle(
-            topic=sections[0],
+            topic=title,
             title=title,
             subtitle=subtitle,
             long_post=self.tone_guard.polish(long_post),
